@@ -1042,9 +1042,11 @@ def _cli() -> bool:
 
 
 def main() -> None:
+    # Dispatch to CLI if args were passed; otherwise run as an MCP stdio server.
+    if _cli():
+        return
     mcp.run()
 
 
 if __name__ == "__main__":
-    if not _cli():
-        main()
+    main()
