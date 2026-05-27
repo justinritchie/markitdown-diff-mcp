@@ -42,11 +42,55 @@ import os
 import pathlib
 import re
 import sys
-from typing import Any, Dict, List, Literal, Optional, Tuple
+from typing import Annotated, Any, Dict, List, Literal, Optional, Tuple
 
 from fastmcp import FastMCP
+from pydantic import BeforeValidator
 
 mcp = FastMCP("markitdown-diff")
+
+
+# ---------------------------------------------------------------------------
+# Type coercion — accept dict/list params as either real JSON or a JSON-encoded
+# string. Some MCP clients string-serialize structured args before sending; this
+# keeps the tool usable from every client without losing strict validation.
+# ---------------------------------------------------------------------------
+def _coerce_dict_arg(v: Any) -> Any:
+    if v is None or isinstance(v, dict):
+        return v
+    if isinstance(v, str):
+        s = v.strip()
+        if not s:
+            return None
+        try:
+            parsed = json.loads(s)
+        except json.JSONDecodeError as e:
+            raise ValueError(f"expected a JSON object; got unparseable string: {e}")
+        if not isinstance(parsed, dict):
+            raise ValueError("expected a JSON object")
+        return parsed
+    raise ValueError(f"expected an object/dict, got {type(v).__name__}")
+
+
+def _coerce_list_arg(v: Any) -> Any:
+    if v is None or isinstance(v, list):
+        return v
+    if isinstance(v, str):
+        s = v.strip()
+        if not s:
+            return None
+        try:
+            parsed = json.loads(s)
+        except json.JSONDecodeError as e:
+            raise ValueError(f"expected a JSON array; got unparseable string: {e}")
+        if not isinstance(parsed, list):
+            raise ValueError("expected a JSON array")
+        return parsed
+    raise ValueError(f"expected an array/list, got {type(v).__name__}")
+
+
+_Obj = Annotated[Optional[Dict[str, Any]], BeforeValidator(_coerce_dict_arg)]
+_List = Annotated[Optional[List[Any]], BeforeValidator(_coerce_list_arg)]
 
 # ---------------------------------------------------------------------------
 # Config + security
@@ -544,7 +588,7 @@ async def compare_text(
 )
 async def compare_markdown(
     before: str, after: str,
-    normalize: Optional[Dict[str, Any]] = None,
+    normalize: _Obj = None,
     granularity: str = "word", output: str = "json", context_lines: int = 3,
     hide_unchanged: bool = False,
 ) -> Dict[str, Any]:
@@ -579,7 +623,7 @@ async def compare_files(
     before_path: str, after_path: str,
     mode: str = "auto", converter: Optional[str] = None,
     granularity: str = "word", output: str = "json", context_lines: int = 3,
-    normalize: Optional[Dict[str, Any]] = None,
+    normalize: _Obj = None,
     hide_unchanged: bool = False,
 ) -> Dict[str, Any]:
     try:
@@ -696,7 +740,7 @@ async def normalize_to_markdown(
 )
 async def summarize_diff(
     before: str, after: str,
-    normalize: Optional[Dict[str, Any]] = None, granularity: str = "word",
+    normalize: _Obj = None, granularity: str = "word",
 ) -> Dict[str, Any]:
     try:
         if not isinstance(before, str) or not isinstance(after, str):
@@ -887,7 +931,7 @@ async def count_file(path: str, converter: Optional[str] = None) -> Dict[str, An
 )
 async def find_replace_text(
     text: str, pattern: Optional[str] = None, replacement: str = "",
-    operations: Optional[List[Dict[str, Any]]] = None,
+    operations: _List = None,
     regex: bool = False, dry_run: bool = True, max_matches: int = 200,
 ) -> Dict[str, Any]:
     try:
@@ -937,7 +981,7 @@ async def find_replace_text(
 async def replace_in_file(
     path: str,
     pattern: Optional[str] = None, replacement: str = "",
-    operations: Optional[List[Dict[str, Any]]] = None,
+    operations: _List = None,
     regex: bool = False, dry_run: bool = True,
     output_path: Optional[str] = None, overwrite_in_place: bool = False,
     converter: Optional[str] = None, max_matches: int = 200,

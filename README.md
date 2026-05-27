@@ -118,8 +118,9 @@ uv run --script server.py  # uses the inline script header
       "command": "uvx",
       "args": ["--from", "git+https://github.com/justinritchie/markitdown-diff-mcp", "markitdown-diff-mcp"],
       "env": {
-        "MARKITDOWN_DIFF_DEFAULT_CONVERTER": "markitdown",
-        "MARKITDOWN_DIFF_ALLOWED_ROOTS": "/Users/you/Documents:/Users/you/work"
+        "MARKITDOWN_DIFF_DEFAULT_CONVERTER": "markitdown"
+        // MARKITDOWN_DIFF_ALLOWED_ROOTS is opt-in — leave unset for full
+        // user-level read access; set to "/dir1:/dir2" to sandbox reads.
       }
     }
   }
@@ -128,11 +129,11 @@ uv run --script server.py  # uses the inline script header
 
 ## Security
 
-- Local files only by default; absolute paths required.
-- Optional workspace allow-list via `MARKITDOWN_DIFF_ALLOWED_ROOTS` (colon-separated dirs). When set, any path outside is rejected with `PATH_OUTSIDE_ALLOWED_ROOT`.
+- Local files only; absolute paths required.
+- **`MARKITDOWN_DIFF_ALLOWED_ROOTS` is opt-in, not on by default.** Leave it unset and the server reads any path your user account can read (which is the same access surface as your shell, your editor, and every other local MCP). Set it (colon-separated dirs) only if you want to bound the blast radius — useful when running the server for someone else, sharing it across agents, or sandboxing per project.
 - File size cap default 25 MB (`MARKITDOWN_DIFF_MAX_FILE_BYTES`).
 - Output character cap default 5 MB (`MARKITDOWN_DIFF_MAX_OUTPUT_CHARS`).
-- Find/replace defaults to `dry_run=true`. Writes require explicit opt-in.
+- Find/replace defaults to `dry_run=true`. Writes require explicit opt-in (`output_path` or `overwrite_in_place=True`).
 
 ## Roadmap
 
