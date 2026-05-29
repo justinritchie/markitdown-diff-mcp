@@ -41,7 +41,10 @@ import json
 import os
 import pathlib
 import re
+import shutil
+import subprocess
 import sys
+import tempfile
 from typing import Annotated, Any, Dict, List, Literal, Optional, Tuple
 
 from fastmcp import FastMCP
@@ -651,6 +654,159 @@ async def compare_files(
             after_meta={"source": str(a_path), "format": a_fmt, "converted": a_converted,
                         "converter": conv if a_converted else None},
         )
+    except Exception as e:
+        return _err("DIFF_FAILED", f"{type(e).__name__}: {e}")
+
+
+# ---------------------------------------------------------------------------
+# CSS — structural-aware diff via Prettier-normalize + difftastic
+# ---------------------------------------------------------------------------
+# CSS diff has four problems that text diff doesn't handle: whitespace/format
+# noise, rule-order shuffles, selector-grouping equivalences, and per-rule
+# property order. Pre-formatting both sides with Prettier collapses ~90% of
+# that noise into a canonical shape, which the existing line-diff engine then
+# handles correctly. `difft` (difftastic) is an optional second view —
+# tree-sitter-backed structural diff rendered as terminal output, useful when
+# a human (rather than an agent) is reviewing the result.
+
+_CSS_PARSERS = {"css", "scss", "less"}
+
+
+def _prettier_normalize_css(text: str, parser: str = "css") -> str:
+    """Pipe text through `prettier --parser <parser>` for canonical formatting.
+    Returns the input unchanged if prettier isn't on PATH or fails — best-effort
+    so the tool stays useful when prettier isn't installed."""
+    bin_path = shutil.which("prettier")
+    if not bin_path:
+        return text
+    try:
+        r = subprocess.run(
+            [bin_path, "--parser", parser, "--stdin-filepath", f"input.{parser}"],
+            input=text, capture_output=True, text=True, timeout=30,
+        )
+        if r.returncode == 0 and r.stdout:
+            return r.stdout
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+        pass
+    return text
+
+
+def _run_difftastic(before: str, after: str, suffix: str = ".css") -> Optional[str]:
+    """Run difft against two tempfiles, return its stdout (no color codes).
+    Returns None if difft isn't installed or the run fails — tool stays useful
+    without it."""
+    bin_path = shutil.which("difft")
+    if not bin_path:
+        return None
+    b_path = a_path = None
+    try:
+        with tempfile.NamedTemporaryFile(mode="w", suffix=suffix, delete=False, encoding="utf-8") as f:
+            f.write(before); b_path = f.name
+        with tempfile.NamedTemporaryFile(mode="w", suffix=suffix, delete=False, encoding="utf-8") as f:
+            f.write(after); a_path = f.name
+        r = subprocess.run(
+            [bin_path, "--color=never", b_path, a_path],
+            capture_output=True, text=True, timeout=30,
+        )
+        return r.stdout or None
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+        return None
+    finally:
+        for p in (b_path, a_path):
+            if p:
+                try:
+                    os.unlink(p)
+                except OSError:
+                    pass
+
+
+@mcp.tool(
+    description=(
+        "Compare two CSS / SCSS / LESS stylesheets — the dedicated CSS-aware "
+        "diff tool. Use whenever you need to: see what changed in a "
+        "stylesheet, diff a developer's CSS update, compare WordPress theme "
+        "files across sites, audit which selectors / properties / CSS custom "
+        "properties (variables) changed between versions, review a CSS pull "
+        "request, compare before/after of a build pipeline, or check what's "
+        "different between two stylesheets. Pre-formats both sides with "
+        "Prettier first so formatting noise (whitespace, brace style, property "
+        "spacing, minified-vs-prettified, property ordering within a rule) "
+        "doesn't drown out the real semantic changes — then runs the structured "
+        "line-diff engine to surface added / removed / modified rules and "
+        "declarations. Much better than raw text diff or `git diff` for CSS "
+        "specifically.\n"
+        "Accepts either inline `before` + `after` strings OR `before_path` + "
+        "`after_path` file paths (absolute). Returns the same rich JSON shape "
+        "as compare_files: per-side stats (chars/words/lines/sentences), hunks "
+        "with line numbers + word-level token edits inside modified blocks, "
+        "replacements roll-up (the 'this rule → that rule' view), optional "
+        "unified diff and Markdown report. Set `include_difftastic=True` for "
+        "an additional syntax-aware tree-edit view from `difft` (best when a "
+        "human is reviewing — agents will usually prefer the JSON hunks).\n"
+        "Args: before / after (strings) OR before_path / after_path (absolute "
+        "paths); normalize (default True — set False to skip Prettier and "
+        "diff raw bytes); parser ('css' default | 'scss' | 'less'); "
+        "granularity ('line' default — word-level is usually noise on CSS); "
+        "output ('json' | 'unified' | 'markdown' | 'all'); context_lines; "
+        "hide_unchanged; include_difftastic. Prettier and difft are auto-"
+        "detected; the tool degrades gracefully if either is missing — the "
+        "diff still runs against unnormalized text."
+    ),
+)
+async def compare_css(
+    before: Optional[str] = None, after: Optional[str] = None,
+    before_path: Optional[str] = None, after_path: Optional[str] = None,
+    normalize: bool = True, parser: str = "css",
+    granularity: str = "line", output: str = "json", context_lines: int = 3,
+    hide_unchanged: bool = False, include_difftastic: bool = False,
+) -> Dict[str, Any]:
+    try:
+        if parser not in _CSS_PARSERS:
+            return _err("INVALID_INPUT", f"parser must be one of {sorted(_CSS_PARSERS)}; got {parser!r}")
+
+        def _load_side(text: Optional[str], p: Optional[str], label: str) -> Tuple[str, str, str]:
+            if text is not None and p is not None:
+                raise ValueError(("INVALID_INPUT", f"provide either {label} or {label}_path, not both"))
+            if text is not None:
+                if not isinstance(text, str):
+                    raise ValueError(("INVALID_INPUT", f"{label} must be a string"))
+                return text, "inline", parser
+            if p is None:
+                raise ValueError(("INVALID_INPUT", f"provide either {label} or {label}_path"))
+            path = _resolve_path(p)
+            return path.read_text(encoding="utf-8", errors="replace"), str(path), (path.suffix.lstrip(".") or parser)
+
+        try:
+            b_text, b_src, b_fmt = _load_side(before, before_path, "before")
+            a_text, a_src, a_fmt = _load_side(after, after_path, "after")
+        except ValueError as e:
+            code, msg = e.args[0]
+            return _err(code, msg)
+
+        normalized_flag = False
+        if normalize:
+            b_norm = _prettier_normalize_css(b_text, parser)
+            a_norm = _prettier_normalize_css(a_text, parser)
+            normalized_flag = bool(shutil.which("prettier"))
+            b_text, a_text = b_norm, a_norm
+
+        result = _build_result(
+            b_text, a_text,
+            granularity=granularity, output=output, context_lines=context_lines,
+            hide_unchanged=hide_unchanged,
+            before_meta={"source": b_src, "format": b_fmt, "converted": False,
+                         "normalized": normalized_flag, "parser": parser},
+            after_meta={"source": a_src, "format": a_fmt, "converted": False,
+                        "normalized": normalized_flag, "parser": parser},
+        )
+
+        if include_difftastic and not (isinstance(result, dict) and "error" in result):
+            suffix = "." + parser
+            dft = _run_difftastic(b_text, a_text, suffix=suffix)
+            if dft:
+                result["difftastic_view"] = dft
+
+        return result
     except Exception as e:
         return _err("DIFF_FAILED", f"{type(e).__name__}: {e}")
 
