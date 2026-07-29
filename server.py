@@ -3,9 +3,16 @@
 # requires-python = ">=3.10"
 # dependencies = [
 #   "fastmcp>=3.2,<4",
-#   "markitdown[all]>=0.0.1a4",
+#   "markitdown[all]>=0.0.1a4,<1",
 # ]
 # ///
+#
+# Ceilings on everything, and run LOCALLY via `uv run --script`, never via
+# `uvx --from git+…`. That pattern installs the repo as a DEPENDENCY, so uv
+# resolves fresh from the loosest specs and ignores any committed lockfile —
+# which is how the cloudflare connector died on 2026-07-28 when mcp 2.0.0
+# shipped. Local script + pinned deps means an upstream release can't break a
+# working connector between one launch and the next. See tasks/lessons.md.
 """
 markitdown-diff — local MCP for comparing Markdown, text, and converted documents.
 

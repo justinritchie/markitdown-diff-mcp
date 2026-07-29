@@ -25,7 +25,8 @@ classifiers = [
 ]
 dependencies = [
     "fastmcp>=3.2,<4",
-    "markitdown[all]>=0.0.1a4",
+    "markitdown[all]>=0.0.1a4,<1",
+]>=0.0.1a4",
 ]
 
 [project.optional-dependencies]
